@@ -1,0 +1,270 @@
+---
+title: "Klassifikation: Ein reales Beispiel"
+output: html_document
+date: "2026-05-06"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(readr)
+library(tidyr)
+library(dplyr)
+library(googlesheets4)
+library(openxlsx)
+```
+
+## Daten (mit Zufallszahlen ergänzen und einlesen)
+
+```{r}
+set.seed(123)
+df <- data.frame(
+  class1 = rbinom(724, size = 1, prob = 0.5),
+  class2 = rbinom(724, size = 1, prob = 0.5),
+  class3 = rbinom(724, size = 1, prob = 0.5)
+)
+write.xlsx(x = df, file = "~/Downloads/class.xlsx")
+```
+
+```{r read-data, eval = FALSE}
+url <- "https://docs.google.com/spreadsheets/d/1RFVz11M936YBpqo8sK2iPv570BHusYBEcwX9SsnqXOA/edit?gid=0#gid=0"
+gs4_auth()
+gs <- read_sheet(url, sheet = "Instagram")
+gs_randomized <- gs[sample(1:nrow(gs), nrow(gs)),]
+for (i in 3:6) gs_randomized[[i]] <- NA
+
+for (i in 1:6){
+  googlesheets4::write_sheet(
+    ss = url,
+    sheet = paste("batch", i, sep = ""),
+    data = gs_randomized[(i * 100 - 99):(i * 100),]
+  )
+}
+```
+
+
+## Daten einlesen
+
+```{r}
+coded <- lapply(
+  1:6,
+  function(i){
+    googlesheets4::read_sheet(
+      ss = url,
+      sheet = paste("batch", i, sep = "")
+    )
+  }
+) %>% 
+  bind_rows()
+
+coded <- coded %>% 
+  mutate(
+    has_code = apply(
+      coded[,3:8] %>% as.matrix(),
+      1,
+      function(row) !all(is.na(row))
+    )
+  )
+```
+
+
+```{r}
+coded_min <- coded %>% 
+  filter(has_code == TRUE)
+
+coded_abs <- coded_min %>% 
+  select(-id, -Kommentar, -Konfidenz) %>% 
+  summarise(
+    `Solidarität und Unterstützung` = sum(!is.na(`Unterstützung/Solidarität`)),
+    Relativierung = sum(!is.na(`Relativierung (weit verstanden)`)),
+    Kritik = sum(!is.na(Kritik)),
+    Sexismus = sum(!is.na(Sexismus)),
+    `neutral/keine Bewertung` = sum(!is.na(`neutral/keine Bewertung`))
+  ) %>% 
+  t()
+  
+coded_shares <- tibble(
+  Kategorie = rownames(coded_abs),
+  human_abs = coded_abs[,1],
+  human_share = round(coded_abs[,1] / sum(coded_abs[,1]) * 100, 1)
+)
+```
+
+```{r}
+coded_min %>% 
+  select(id, Kommentar) %>% 
+  write_csv("~/Downloads/ColienFernandesInsta.csv")
+```
+
+```{r}
+coded_ki <- read_csv("~/Downloads/klassifiziert.csv")
+coded_ki_shares <- coded_ki %>% 
+  group_by(Kategorie) %>% 
+  summarise(ki_n = n()) %>% 
+  mutate(ki_share = round(ki_n / sum(ki_n) * 100, 1))
+
+coded_ki_shares
+```
+
+## Vergleich der Anteilswerte
+
+```{r}
+coded_ki_shares %>% 
+  left_join(
+    y = coded_shares,
+    by = "Kategorie"
+  ) %>% 
+  select(Kategorie, human_share, ki_share)
+
+```
+
+## Precision / Recall / F1
+
+
+```{r}
+ki <- coded_ki %>% 
+  mutate(
+    ki_support = ifelse(Kategorie == "Solidarität und Unterstützung", TRUE, FALSE),
+    ki_neutral = ifelse(Kategorie == "neutral/keine Bewertung", TRUE, FALSE),
+    ki_kritik = ifelse(Kategorie == "Kritik", TRUE, FALSE)
+  ) %>% 
+  select(-Kommentar, -Kategorie)
+
+human <- coded_min %>% 
+  mutate(
+    human_support = ifelse(is.na(`Unterstützung/Solidarität`), FALSE, TRUE),
+    human_neutral = ifelse(is.na(`neutral/keine Bewertung`), FALSE, TRUE),
+    human_kritik = ifelse(is.na(`Kritik`), FALSE, TRUE)
+  ) %>% 
+  select(id, Kommentar, human_support, human_neutral, human_kritik)
+  
+ki_human <- left_join(ki, y = human, by = "id")
+```
+
+
+## Konfusionsmatrix - Precision - Recall - F1
+
+```{r}
+cm <- caret::confusionMatrix(
+  data = as.factor(ki_human$`ki_support`),
+  reference = as.factor(ki_human$`human_support`)
+)
+
+precision <- cm$byClass["Pos Pred Value"] # gibt es false negatives? (~ unterflogenes Radar)
+recall <- cm$byClass["Sensitivity"] # gibt es false positives ? (~ overblocking / blinder Alarm)
+f1 <- 2 * precision * recall / (precision + recall)
+```
+
+
+## Konfusionsmatrix - Precision - Recall - F1
+
+```{r}
+ki_human %>% 
+  select(-Kommentar) %>% 
+  pivot_longer(cols = -id) %>% 
+  mutate(
+    category = sapply(strsplit(name, "_"), `[`, 2),
+    src = sapply(strsplit(name, "_"), `[`, 1)
+  ) %>% 
+  select(-name) %>% 
+  group_by(category) %>% 
+  group_map(
+    function(.x, .y){
+      data <- pivot_wider(.x, names_from = "src", values_from = "value")
+      cm <- caret::confusionMatrix(
+        data = as.factor(data$`ki`), 
+        reference = as.factor(data$`human`)
+      )
+      tibble(
+        category = .y$category,
+        precision = cm$byClass["Pos Pred Value"],
+        recall = cm$byClass["Sensitivity"]
+      ) %>% 
+        mutate(
+          f1 = 2 * precision * recall / (precision + recall)
+        )
+    }
+  ) %>% 
+  bind_rows()
+```
+
+
+```{r}
+ki_human %>% 
+  filter(ki_support == FALSE & human_support == TRUE) %>% 
+  select(id, Kommentar, human_support, ki_support) %>% 
+  openxlsx::write.xlsx(file = "~/Downloads/false_negatives.xlsx")
+```
+
+
+```{r}
+ki_human %>% 
+  filter(ki_kritik == FALSE & human_kritik == TRUE) %>% 
+  select(id, Kommentar, human_support, ki_support)
+```
+
+```{r}
+cm <- caret::confusionMatrix(
+  data = as.factor(ki_human$`ki_neutral`),
+  reference = as.factor(ki_human$`human_neutral`)
+)
+
+precision <- cm$byClass["Pos Pred Value"] # gibt es false negatives? (~ unterflogenes Radar)
+recall <- cm$byClass["Sensitivity"] # gibt es false positives ? (~ overblocking / blinder Alarm)
+f1 <- 2 * precision * recall / (precision + recall)
+```
+
+
+## Prompt Engineering
+
+```{r}
+file <- "/Users/blaette/Documents/Codex/2026-05-13/ich-habe-f-nf-csv-dateien/hanna_sophie_sicking_standardisiert.csv"
+read.delim(file = file, sep = ";") %>% 
+  write.csv(file = file)
+
+files <- c(
+  "base",
+  "vanesa_muharremi",
+  "finn_brockschmidt",
+  "greta_malin_heumann",
+  "hanna_sophie_sicking"
+)
+files <- sprintf("/Users/blaette/Documents/Codex/2026-05-13/ich-habe-f-nf-csv-dateien/%s_standardisiert.csv", files)
+
+
+lapply(
+  files,
+  function(fname){
+    message(fname)
+    data <- read.csv(fname) %>% 
+      mutate(
+        fname = basename(fname),
+        ki_support = solidarisch_unterstuetzend
+      ) %>% 
+      left_join(
+        y = select(human, id, human_support),
+        by = "id" 
+      ) %>% 
+      select(ki_support, human_support)
+    
+      cm <- caret::confusionMatrix(
+        data = as.factor(data$`ki_support`), 
+        reference = as.factor(data$`human_support`)
+      )
+      tibble(
+        candidate = gsub("_standardisiert\\.csv", "", basename(fname)),
+        precision = cm$byClass["Pos Pred Value"],
+        recall = cm$byClass["Sensitivity"]
+      ) %>% 
+        mutate(
+          f1 = 2 * precision * recall / (precision + recall)
+        )
+  }
+) %>% 
+  bind_rows()
+```
+
