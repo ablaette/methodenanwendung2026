@@ -1,7 +1,7 @@
 ---
 title: "Klassifikation: Ein reales Beispiel"
 output: html_document
-date: "2026-05-06"
+date: "2026-05-20"
 editor_options: 
   chunk_output_type: console
 ---
